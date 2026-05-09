@@ -23,7 +23,7 @@ from backend.vector_store import search as vs_search
 
 load_dotenv()
 
-llm = ChatOpenAI(model="gpt-5-mini")
+llm = ChatOpenAI(model="gpt-5.4-mini")
 
 
 # ── State ─────────────────────────────────────────────────────────────────────

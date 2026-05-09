@@ -277,8 +277,13 @@ with st.sidebar:
     # ── Loaded Documents list ──────────────────────────────────────────────────
     st.divider()
     st.markdown("### Loaded Documents")
-    doc_titles = list_papers(active_sid)
-    if doc_titles:
+    try:
+        doc_titles = list_papers(active_sid)
+    except Exception:
+        doc_titles = None
+    if doc_titles is None:
+        st.caption("Could not load document list — try refreshing.")
+    elif doc_titles:
         for title in doc_titles:
             st.markdown(f"- {title}")
     else:
