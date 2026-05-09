@@ -1,8 +1,13 @@
+import re
+import urllib.parse
+import urllib.request
 from pathlib import Path
 
-from langchain_community.document_loaders import ArxivLoader, PyMuPDFLoader, TextLoader, WebBaseLoader
+from langchain_community.document_loaders import PyMuPDFLoader, TextLoader, WebBaseLoader
 from langchain_core.documents import Document
 from langchain_text_splitters import RecursiveCharacterTextSplitter
+
+_ARXIV_ID_RE = re.compile(r"(\d{4}\.\d{4,5}(?:v\d+)?)")
 
 CHUNK_SIZE = 1000
 CHUNK_OVERLAP = 200
@@ -42,15 +47,48 @@ def load_webpage(url: str) -> list[Document]:
     return _stamp_title(_splitter.split_documents(docs), title)
 
 
-def load_arxiv(title: str, load_max_docs: int = 1) -> list[Document]:
-    loader = ArxivLoader(query=title, load_max_docs=load_max_docs, doc_content_chars_max=None)
-    docs = loader.load()
-    splits = _splitter.split_documents(docs)
-    for doc in splits:
-        # ArxivLoader sets "Title" (capital); normalise to lowercase for vector_store
-        if "Title" in doc.metadata and "title" not in doc.metadata:
-            doc.metadata["title"] = doc.metadata["Title"]
-    return splits
+def _extract_arxiv_id(query: str) -> str | None:
+    """Return bare ArXiv ID (no version suffix) if one appears in the query."""
+    m = _ARXIV_ID_RE.search(query)
+    if m:
+        return re.sub(r"v\d+$", "", m.group(1))
+    return None
+
+
+def _arxiv_api_lookup(arxiv_id: str) -> str:
+    """Fetch paper title by ID from the ArXiv Atom API."""
+    url = f"https://export.arxiv.org/api/query?id_list={arxiv_id}"
+    with urllib.request.urlopen(url, timeout=10) as resp:
+        xml = resp.read().decode()
+    titles = re.findall(r"<title>(.*?)</title>", xml, re.DOTALL)
+    return titles[1].strip() if len(titles) > 1 else arxiv_id
+
+
+def _arxiv_search(query: str) -> str:
+    """Search ArXiv Atom API by title phrase and return the top result's bare paper ID."""
+    phrase = query.strip('"')
+    search_query = urllib.parse.quote(f'ti:"{phrase}"')
+    url = f"https://export.arxiv.org/api/query?search_query={search_query}&max_results=1&sortBy=relevance"
+    with urllib.request.urlopen(url, timeout=15) as resp:
+        xml = resp.read().decode()
+    m = re.search(r"<id>https?://arxiv\.org/abs/(\d{4}\.\d{4,5}(?:v\d+)?)</id>", xml)
+    if not m:
+        raise ValueError(f"No ArXiv paper found for: {query!r}")
+    return re.sub(r"v\d+$", "", m.group(1))
+
+
+def _load_arxiv_by_id(arxiv_id: str) -> list[Document]:
+    """Download and chunk an ArXiv paper PDF by its bare ID."""
+    docs = PyMuPDFLoader(f"https://arxiv.org/pdf/{arxiv_id}").load()
+    if not docs:
+        raise ValueError(f"Could not load PDF for ArXiv ID: {arxiv_id}")
+    title = (docs[0].metadata.get("title") or "").strip() or _arxiv_api_lookup(arxiv_id)
+    return _stamp_title(_splitter.split_documents(docs), title)
+
+
+def load_arxiv(query: str) -> list[Document]:
+    arxiv_id = _extract_arxiv_id(query) or _arxiv_search(query)
+    return _load_arxiv_by_id(arxiv_id)
 
 
 def load_document(source: str) -> list[Document]:
