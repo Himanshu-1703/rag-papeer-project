@@ -1,4 +1,5 @@
 import json
+import tempfile
 import uuid
 from datetime import datetime
 from pathlib import Path
@@ -7,7 +8,9 @@ import streamlit as st
 from langchain_core.messages import HumanMessage
 from langchain_openai import ChatOpenAI
 
+from backend.paper_loader import load_arxiv, load_document, load_webpage
 from backend.rag_graph import build_graph
+from backend.vector_store import add_paper, list_papers
 
 st.set_page_config(page_title="Papeer", page_icon="📚", layout="centered")
 
@@ -100,12 +103,34 @@ def create_session() -> str:
     return sid
 
 
+def load_session_chats(session_id: str) -> list[dict]:
+    config = {"configurable": {"thread_id": session_id}}
+    try:
+        state = graph.get_state(config)
+        if not state or not state.values:
+            return []
+        chats = []
+        turn = 0
+        for msg in state.values.get("messages", []):
+            type_name = type(msg).__name__
+            content = msg.content if isinstance(msg.content, str) else str(msg.content)
+            if type_name == "HumanMessage":
+                chats.append({"role": "user", "content": content})
+            elif type_name in ("AIMessage", "AIMessageChunk"):
+                turn += 1
+                chats.append({"role": "assistant", "content": content, "turn": turn, "graph_state": {}})
+        return chats
+    except Exception:
+        return []
+
+
 def switch_session(session_id: str) -> None:
     st.session_state.active_session_id = session_id
     if session_id not in st.session_state.chats:
-        st.session_state.chats[session_id] = []
+        st.session_state.chats[session_id] = load_session_chats(session_id)
     if session_id not in st.session_state.turns:
-        st.session_state.turns[session_id] = 0
+        turn_count = sum(1 for m in st.session_state.chats[session_id] if m["role"] == "assistant")
+        st.session_state.turns[session_id] = turn_count
 
 
 graph = get_graph()
@@ -128,14 +153,16 @@ if "active_session_id" not in st.session_state:
         sid = create_session()
         st.session_state.active_session_id = sid
 
+active_sid = st.session_state.active_session_id
+
 # ── Sidebar ────────────────────────────────────────────────────────────────────
 with st.sidebar:
     if st.button("+ New Chat", use_container_width=True):
         new_sid = create_session()
         st.session_state.active_session_id = new_sid
+        active_sid = new_sid
         st.rerun()
     st.divider()
-    
     st.markdown("## 💬 Sessions")
 
     sorted_sessions = sorted(
@@ -157,18 +184,115 @@ with st.sidebar:
                 switch_session(sid)
                 st.rerun()
 
+    st.divider()
+    st.markdown("## 📄 Documents")
+
+    # ── Section 1: File upload ─────────────────────────────────────────────────
+    st.markdown("**Upload Files**")
+    uploaded_files = st.file_uploader(
+        "PDF, TXT, or Markdown",
+        type=["pdf", "txt", "md", "markdown"],
+        accept_multiple_files=True,
+        key=f"uploader_{active_sid}",
+        label_visibility="collapsed",
+    )
+    if st.button("Add Files", use_container_width=True, key="btn_add_files"):
+        if uploaded_files:
+            processed_key = f"processed_files_{active_sid}"
+            if processed_key not in st.session_state:
+                st.session_state[processed_key] = set()
+            with st.spinner("Processing files…"):
+                for f in uploaded_files:
+                    if f.name in st.session_state[processed_key]:
+                        st.info(f"Already loaded: {f.name}")
+                        continue
+                    suffix = Path(f.name).suffix
+                    tmp_path = None
+                    try:
+                        with tempfile.NamedTemporaryFile(delete=False, suffix=suffix) as tmp:
+                            tmp.write(f.read())
+                            tmp_path = tmp.name
+                        docs = load_document(tmp_path)
+                        for doc in docs:
+                            doc.metadata["title"] = Path(f.name).stem
+                        add_paper(docs, active_sid)
+                        st.session_state[processed_key].add(f.name)
+                        st.success(f"Added: {f.name}")
+                    except Exception as e:
+                        st.error(f"Failed: {f.name} — {e}")
+                    finally:
+                        if tmp_path:
+                            Path(tmp_path).unlink(missing_ok=True)
+            st.rerun()
+        else:
+            st.warning("No files selected.")
+
+    # ── Section 2: Web URL loader ──────────────────────────────────────────────
+    st.markdown("**Web Pages**")
+    url_input = st.text_area(
+        "URLs (one per line)",
+        key=f"url_area_{active_sid}",
+        height=80,
+        label_visibility="collapsed",
+        placeholder="https://example.com/paper",
+    )
+    if st.button("Load URLs", use_container_width=True, key="btn_load_urls"):
+        urls = [u.strip() for u in url_input.splitlines() if u.strip()]
+        if urls:
+            with st.spinner("Loading web pages…"):
+                for url in urls:
+                    try:
+                        docs = load_webpage(url)
+                        add_paper(docs, active_sid)
+                        st.success(f"Loaded: {url[:60]}")
+                    except Exception as e:
+                        st.error(f"Failed: {url[:60]} — {e}")
+            st.rerun()
+        else:
+            st.warning("Enter at least one URL.")
+
+    # ── Section 3: ArXiv loader ────────────────────────────────────────────────
+    st.markdown("**ArXiv Papers**")
+    arxiv_title = st.text_input(
+        "Paper title",
+        key=f"arxiv_input_{active_sid}",
+        label_visibility="collapsed",
+        placeholder="Attention Is All You Need",
+    )
+    if st.button("Load ArXiv Paper", use_container_width=True, key="btn_load_arxiv"):
+        if arxiv_title.strip():
+            with st.spinner("Searching ArXiv…"):
+                try:
+                    docs = load_arxiv(arxiv_title.strip())
+                    add_paper(docs, active_sid)
+                    st.success(f"Loaded: {arxiv_title.strip()}")
+                except Exception as e:
+                    st.error(f"Failed: {e}")
+            st.rerun()
+        else:
+            st.warning("Enter a paper title.")
+
+    # ── Loaded Documents list ──────────────────────────────────────────────────
+    st.divider()
+    st.markdown("### Loaded Documents")
+    doc_titles = list_papers(active_sid)
+    if doc_titles:
+        for title in doc_titles:
+            st.markdown(f"- {title}")
+    else:
+        st.caption("No documents loaded yet.")
+
 # ── Page header ────────────────────────────────────────────────────────────────
 st.title("📚 Papeer — Research Paper Assistant")
 st.markdown(
     "🔍 **Ask questions** from your uploaded papers &nbsp;·&nbsp; "
     "✅ **Verify claims** against recent literature &nbsp;·&nbsp; "
     "🌐 **Search the web** for the latest findings\n\n"
-    "> Upload papers in the sidebar *(coming soon)* and start chatting below."
+    "> Upload documents in the sidebar and start chatting below."
 )
 st.divider()
 
 # ── Chat display ───────────────────────────────────────────────────────────────
-active_sid = st.session_state.active_session_id
 for msg in st.session_state.chats.get(active_sid, []):
     with st.chat_message(msg["role"]):
         st.markdown(msg["content"])
@@ -178,7 +302,6 @@ for msg in st.session_state.chats.get(active_sid, []):
 
 # ── Chat input ─────────────────────────────────────────────────────────────────
 if prompt := st.chat_input("Ask about your papers, verify a claim, or search the web…"):
-    active_sid = st.session_state.active_session_id
     if active_sid not in st.session_state.chats:
         st.session_state.chats[active_sid] = []
     if active_sid not in st.session_state.turns:

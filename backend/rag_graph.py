@@ -186,11 +186,15 @@ QUERY_REWRITE_SYSTEM = (
 # ── Nodes ─────────────────────────────────────────────────────────────────────
 
 def agent_node(state: RAGState) -> dict:
+    current_attempts = state.get("retrieval_attempts", 0)
+    # Once at the cap, use plain LLM so the agent cannot emit more tool calls.
+    # This prevents orphaned tool_call IDs from entering the persisted message history.
+    lm = llm if current_attempts >= MAX_RETRIEVAL_ATTEMPTS else retrieval_llm
     messages = [{"role": "system", "content": RETRIEVE_SYSTEM}] + state["messages"]
-    response = retrieval_llm.invoke(messages)
+    response = lm.invoke(messages)
     updates: dict = {"messages": [response]}
     if getattr(response, "tool_calls", None):
-        updates["retrieval_attempts"] = state.get("retrieval_attempts", 0) + 1
+        updates["retrieval_attempts"] = current_attempts + 1
     return updates
 
 
@@ -360,10 +364,15 @@ def route_query(state: RAGState) -> str:
 
 
 def agent_routing(state: RAGState) -> str:
+    # Always execute pending tool calls first — shortcutting here would leave
+    # an AIMessage with tool_calls unmatched by ToolMessages in the checkpointer,
+    # corrupting history for all future turns in the same session.
+    tc = tools_condition(state)
+    if tc == "tools":
+        return "retrieval"
     if state.get("retrieval_attempts", 0) >= MAX_RETRIEVAL_ATTEMPTS:
         return "generate_answer"
-    tc = tools_condition(state)
-    return "retrieval" if tc == "tools" else "relevancy_check"
+    return "relevancy_check"
 
 
 def after_relevancy_routing(state: RAGState) -> str:

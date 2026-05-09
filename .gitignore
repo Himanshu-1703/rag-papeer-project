@@ -222,6 +222,7 @@ __marimo__/
 # claude
 .claude/
 CLAUDE.md
+report.md
 
 # tests
 tests/
