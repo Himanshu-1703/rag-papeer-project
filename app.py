@@ -95,7 +95,7 @@ def create_session() -> str:
     st.session_state.sessions_meta[sid] = {
         "id": sid,
         "name": "New Session",
-        "created_at": datetime.utcnow().isoformat(),
+        "created_at": datetime.now().isoformat(),
         "is_named": False,
     }
     save_sessions(st.session_state.sessions_meta)

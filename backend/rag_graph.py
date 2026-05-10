@@ -139,7 +139,7 @@ def web_search(
 # ── Retrieval agent singletons ────────────────────────────────────────────────
 
 RETRIEVAL_TOOLS = [retrieve_from_vectorstore, web_search]
-retrieval_llm = llm.bind_tools(RETRIEVAL_TOOLS)
+retrieval_llm = llm.bind_tools(RETRIEVAL_TOOLS, parallel_tool_calls=False)
 base_tool_node = ToolNode(RETRIEVAL_TOOLS)
 
 RETRIEVE_SYSTEM = (
@@ -148,7 +148,7 @@ RETRIEVE_SYSTEM = (
     "1. retrieve_from_vectorstore — searches the uploaded paper collection.\n"
     "   You decide:\n"
     "   - query: the semantic search query (phrase it to best match relevant paper chunks)\n"
-    "   - k: how many chunks to retrieve (1–20; use more for broad questions, fewer for specific ones)\n\n"
+    "   - k: how many chunks to retrieve (1–10; use more for broad questions, fewer for specific ones)\n\n"
     "2. web_search — searches the live web via Tavily.\n"
     "   You decide:\n"
     "   - optimized_query: rewrite the user's question as a concise, keyword-rich web search query\n"
@@ -156,7 +156,7 @@ RETRIEVE_SYSTEM = (
     "Choose the right source based on the question:\n"
     "- Questions about the uploaded papers → use retrieve_from_vectorstore\n"
     "- Questions about current events, recent developments, or supplementary information → use web_search\n"
-    "- You may call both tools if the question benefits from multiple sources.\n\n"
+    "- Call only one tool per turn.\n\n"
     "Do NOT produce a final answer. Only call tools to collect context."
 )
 
@@ -189,6 +189,8 @@ def agent_node(state: RAGState) -> dict:
     current_attempts = state.get("retrieval_attempts", 0)
     # Once at the cap, use plain LLM so the agent cannot emit more tool calls.
     # This prevents orphaned tool_call IDs from entering the persisted message history.
+    # retrieval llm --> tool call --> tool result
+    # llm --> no tools are bounded --> tool call
     lm = llm if current_attempts >= MAX_RETRIEVAL_ATTEMPTS else retrieval_llm
     messages = [{"role": "system", "content": RETRIEVE_SYSTEM}] + state["messages"]
     response = lm.invoke(messages)
