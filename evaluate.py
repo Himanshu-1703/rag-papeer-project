@@ -1,6 +1,5 @@
 import json
 import sys
-import uuid
 from pathlib import Path
 from uuid import uuid4
 
@@ -11,6 +10,7 @@ from dotenv import load_dotenv
 from langchain_core.messages import HumanMessage
 
 from deepeval import evaluate
+from deepeval.evaluate import AsyncConfig
 from deepeval.metrics import (
     AnswerRelevancyMetric,
     ContextualPrecisionMetric,
@@ -30,8 +30,7 @@ load_dotenv()
 
 PDF_PATH            = "documents/Openclaw_Research_Report.pdf"
 GOLDENS_FILE        = Path("goldens.json")
-EVAL_SESSION_ID     = f"evaluation_session_{uuid4()}"
-MAX_CONTEXTS        = 10
+MAX_CONTEXTS        = 5
 GOLDENS_PER_CONTEXT = 2
 METRIC_THRESHOLD    = 0.7
 
@@ -59,12 +58,12 @@ def load_goldens() -> list[dict]:
     return json.loads(GOLDENS_FILE.read_text(encoding="utf-8"))
 
 
-def run_rag_query(graph, query: str) -> tuple[str, list[str]]:
-    config = {"configurable": {"thread_id": f"eval_{uuid.uuid4().hex}"}}
+def run_rag_query(graph, query: str, session_id: str) -> tuple[str, list[str]]:
+    config = {"configurable": {"thread_id": str(session_id)}}
     final_state = graph.invoke(
         {
             "messages": [HumanMessage(content=query)],
-            "session_id": EVAL_SESSION_ID,
+            "session_id": session_id,
             "query": query,
             "retrieved_docs": [],
             "retrieval_attempts": 0,
@@ -81,8 +80,6 @@ def main() -> None:
     pairs = load_goldens() if GOLDENS_FILE.exists() else generate_goldens()
 
     docs = load_document(PDF_PATH)
-    add_paper(docs, EVAL_SESSION_ID)
-
     graph = build_graph(db_path="eval_checkpoints.db")
 
     metrics = [
@@ -95,8 +92,11 @@ def main() -> None:
 
     test_cases = []
     for pair in pairs:
+        session_id = f"evaluation_session_{uuid4()}"
+        add_paper(docs, session_id)
+
         query = pair["input"] + " as per the report in knowledge base"
-        answer, retrieval_context = run_rag_query(graph, query)
+        answer, retrieval_context = run_rag_query(graph, query, session_id)
         test_cases.append(
             LLMTestCase(
                 input=pair["input"],
@@ -106,7 +106,11 @@ def main() -> None:
             )
         )
 
-    results = evaluate(test_cases, metrics)
+    results = evaluate(
+        test_cases,
+        metrics,
+        async_config=AsyncConfig(max_concurrent=3, throttle_value=5),
+    )
 
     summary = []
     for test_result in results.test_results:

@@ -234,3 +234,7 @@ embedding_cache/
 
 # database
 /*.db
+/*.db-*
+
+# deep eval
+.deepeval/
